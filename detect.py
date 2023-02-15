@@ -33,6 +33,7 @@ import os
 import platform
 import sys
 from pathlib import Path
+from datetime import datetime
 
 import torch
 
@@ -114,7 +115,26 @@ def run(
     # Run inference
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
+
+    empty_frames = 0
+    recording=None
+
+    def recorder(H, W):
+        now = datetime.now()
+        dt_string = now.strftime("%d-%m-%Y-%H-%M-%S")
+        print(str(dt_string) + '.mp4')
+        fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
+        out = cv2.VideoWriter("vids/"+str(dt_string) + '.mp4', fourcc, 30.0, (W, H))
+        return out
+
+    first_time=True
     for path, im, im0s, vid_cap, s in dataset:
+        H,W=im0s.shape[:2]
+        if first_time:
+            writer = recorder(H, W)
+            first_time=False
+        IDS=[]
+        boxes1=[]
         with dt[0]:
             im = torch.from_numpy(im).to(model.device)
             im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
@@ -202,12 +222,40 @@ def run(
                         save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
                         vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                     vid_writer[i].write(im0)
-
+        IDS.clear()
+        for items in det:
+            IDS.append(items[5].item())
+            x=int(float(items[0]))
+            y=int(float(items[1]))
+            boxes1.append((x,y))
+        if (0 in IDS and 2 in IDS) or (0 in IDS and 1 in IDS) or (0 in IDS and 2 in IDS and 1 in IDS):
+            empty_frames = 0
+        else:
+            empty_frames += 1
+        if len(boxes1) > 1:
+            x1, y1 = boxes1[0]
+            x2, y2 = boxes1[1]
+            dist = (((x1 - x2) ** 2) + ((y1 - y2) ** 2)) ** 0.5
+            print(dist)
+            if dist < 700 and recording != True:
+                print("start")
+                recording = True
+        if empty_frames > 60 and recording == True:
+            print("stop")
+            recording = False
+        if recording == True:
+            writer.write(im0)
+            print("written")
+        if recording == False:
+            print("new")
+            writer = recorder(H, W)
+            recording=None
         # Print time (inference-only)
         LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
 
     # Print results
     t = tuple(x.t / seen * 1E3 for x in dt)  # speeds per image
+    print(empty_frames)
     LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS per image at shape {(1, 3, *imgsz)}' % t)
     if save_txt or save_img:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
